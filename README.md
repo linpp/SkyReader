@@ -20,6 +20,7 @@ HIDAPI can be found here http://www.signal11.us/oss/hidapi/
     -e		encrypt data when writing file.
     -D		dump the data of a skylander to the display.
     -l		List skylanders on portal.
+    -r <device> redirect portal [pP] options to RC522 on serial device.
 
     Upgrade:
     -M <money>	upgrade skylander money (max 65,000).
@@ -46,3 +47,9 @@ Upgrade skylander, leave skills as is, and write to the portal.
 
     editor -i spyro.bin -P
 Read file from spyro.bin and write it to the portal.
+
+    editor -r /dev/cu.usbserial-14430 -p -D
+Redirect portal (-p) to an mfrc522 arduino on /dev/cu.usbserial-14430 and dump the card on the device.
+
+    editor -r /dev/cu.usbserial-14430 -i spyro.bin -P
+Redirect portal (-P) to an mfrc522 arduino on /dev/cu.usbserial-14430 and write spyro.bin to the card on the device.
