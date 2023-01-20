@@ -27,8 +27,10 @@
  * Created by Peter Lin on 1/15/23
  */
 
+#include <AES.h>
 #include <SPI.h>
 #include <MFRC522.h>
+#include "md5.h"
 
 #define RST_PIN         9           // Configurable, see typical pin layout above
 #define SS_PIN          10          // Configurable, see typical pin layout above
@@ -46,13 +48,15 @@ byte buffer[18];
 byte atqa[2];
 byte atqa_size;
 
-byte secData[BLOCKS_PER_SECTOR][BLOCK_SIZE];
+byte daBlock[3][BLOCK_SIZE];        // [0] = block0, [1] = block1, [2] = general buffer
 byte secKeys[NUM_SECTORS][MFRC522::MF_KEY_SIZE];
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);   // Create MFRC522 instance.
 MFRC522::StatusCode status;
     
 bool debug = false;
+
+AES aes;
 
 // Number of known default keys (hard-coded)
 // NOTE: Synchronize the NR_KNOWN_KEYS define with the defaultKeys[] array
@@ -69,6 +73,9 @@ const byte knownKeys[NR_KNOWN_KEYS][MFRC522::MF_KEY_SIZE] =  {
     {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, // AA BB CC DD EE FF
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}  // 00 00 00 00 00 00
 };
+
+static const char* _PASS = "O";
+static const char* _FAIL = "X";
 
 /*
  * Wake the card and select the old uid.  When an operation fails, the card will
@@ -100,7 +107,7 @@ inline byte shift_crc(byte* crc, byte bytes) {
  * Psuedo crc of a byte array in LE MSB. The byte array defines the scope
  * of operation avoiding extra shifts and masks.
  */
-void pseudo_crc(byte bytes, byte* poly, byte* crc, byte *data, byte len) {
+void pseudo_crc(byte bytes, const byte* poly, byte* crc, byte *data, byte len) {
     for (byte i=0; i<len; i++) {
         crc[bytes-1] ^= data[i];
         for (byte k=0; k<8; k++) {
@@ -135,11 +142,32 @@ void pseudo_crc16(byte *crc, byte* data, byte len) {
  */
 void calc_keya(byte* uid, byte sector, byte* key) {
     const byte magic[MFRC522::MF_KEY_SIZE] = {0xc4, 0x0c, 0x26, 0x03, 0xe9, 0x9a};
-    byte *pk = (sector) ? magic : knownKeys[0];
+    const byte *pk = (sector) ? magic : knownKeys[0];
     memcpy(key, pk, MFRC522::MF_KEY_SIZE);
     if (sector > 0 && sector < NUM_SECTORS) {
         byte data[5] = { uid[0], uid[1], uid[2], uid[3], sector };
         pseudo_crc48(key, data, 5);
+    }
+}
+
+void dump_byte_array_int(byte *buffer, byte bufferSize, byte sep=0) {
+    for (byte i = 0; i < bufferSize; i++) {
+        if (buffer[i] < 0x10) Serial.print("0");
+        Serial.print(buffer[i], HEX);
+        if (sep) Serial.print(" ");
+    }
+}
+
+void dump_byte_array(byte *buffer, byte bufferSize, byte sep=0) {
+    dump_byte_array_int(buffer, bufferSize, sep);
+    Serial.println();
+}
+ 
+void dump_byte_array1(byte *buffer, byte bufferSize) {
+    for (byte i = 0; i < bufferSize; i++) {
+      byte c = buffer[i];
+      c = (c < 0x20 || c > 0x7E) ? '.' : c;
+      Serial.write(c);
     }
 }
 
@@ -161,29 +189,6 @@ void key_gen(byte *uid, byte uidSize){
     }
 }
 
-void dump_byte_array_int(byte *buffer, byte bufferSize, char *prefix) {
-    for (byte i = 0; i < bufferSize; i++) {
-        Serial.print(prefix ? prefix : "");
-        Serial.print(buffer[i] < 0x10 ? "0" : "");
-        Serial.print(buffer[i], HEX);
-    }
-}
-
-void dump_byte_array(byte *buffer, byte bufferSize, char *prefix) {
-    dump_byte_array_int(buffer, bufferSize, prefix);
-    Serial.println();
-}
-
-void dump_byte_array(byte *buffer, byte bufferSize) {
-    dump_byte_array(buffer, bufferSize, " ");
-}
-
-void dump_byte_array1(byte *buffer, byte bufferSize) {
-    for (byte i = 0; i < bufferSize; i++) {
-      Serial.write(buffer[i]);
-    }
-    Serial.println();
-}
 
 /*
  * Try authenticating with the given key, wake up card if necessary
@@ -208,13 +213,13 @@ bool auth_key(byte command, byte block, MFRC522::MIFARE_Key *key) {
 /*
  * Read block with a known key
  */
-bool read_block(byte block, MFRC522::MIFARE_Key *key)
+bool read_block(byte block, MFRC522::MIFARE_Key *key, bool dump)
 {
     bool result = false;
     byte len = sizeof(buffer);
     if (debug) {     
         Serial.print(F("Authenticating using key A: "));
-        dump_byte_array(key->keyByte, MFRC522::MF_KEY_SIZE);
+        dump_byte_array(key->keyByte, MFRC522::MF_KEY_SIZE, 1);
     }
     if (!auth_key(MFRC522::PICC_CMD_MF_AUTH_KEY_A, block, key))
         return false;
@@ -231,11 +236,15 @@ bool read_block(byte block, MFRC522::MIFARE_Key *key)
         if (isSectorTrailer(block)) {
           memcpy(buffer, key->keyByte, MFRC522::MF_KEY_SIZE);
         }
-        if (debug) {        
-          dump_byte_array_int(&block, 1, NULL);
-          Serial.print(F(": "));
+        if (dump) {
+          if (debug) {        
+            dump_byte_array_int(&block, 1);
+            Serial.print(F(": "));
+          }
+          dump_byte_array(buffer, BLOCK_SIZE);
         }
-          dump_byte_array(buffer, BLOCK_SIZE, NULL);
+        byte line = (block < 2) ? block : 2;
+        memcpy(daBlock[line], buffer, BLOCK_SIZE);
     }
     return result;
 }
@@ -243,14 +252,14 @@ bool read_block(byte block, MFRC522::MIFARE_Key *key)
 /*
  * Read block with unknown key (key search)
  */
-bool read_block(byte block) {
+bool read_block(byte block, bool dump) {
     MFRC522::MIFARE_Key key;
     byte sector = block / BLOCKS_PER_SECTOR;
     bool result = false;
     if (block > 63) {
       if (debug) {
         Serial.print(F("block "));
-        dump_byte_array_int(&block, 1, NULL);
+        dump_byte_array_int(&block, 1);
         Serial.println(F(" out of range"));        
       }
       return false;
@@ -258,7 +267,7 @@ bool read_block(byte block) {
     if (block == 0) {
         for (byte k = 0; k < NR_KNOWN_KEYS; k++) {
             memcpy(key.keyByte, knownKeys[k], MFRC522::MF_KEY_SIZE);
-            result = read_block(block, &key);
+            result = read_block(block, &key, dump);
             if (result) {
                 if (k == 0) {
                     // card is skylanders, generate sector keys
@@ -276,7 +285,7 @@ bool read_block(byte block) {
         for (byte k = 0; k < NR_KNOWN_KEYS; k++) {
             // try default key first, then known keys
             memcpy(key.keyByte, (k == 0) ? secKeys[sector] : knownKeys[k], MFRC522::MF_KEY_SIZE);
-            result = read_block(block, &key);
+            result = read_block(block, &key, dump);
             if (result) {
                  if (k != 0)   // update the sector key
                      memcpy(secKeys[sector], knownKeys[k], MFRC522::MF_KEY_SIZE);
@@ -304,7 +313,7 @@ void setup() {
 }
 
 void menu() {
-    Serial.println(F("1 Read EML\n2 Serial dump\n3 Reset Figure\n4 Reset keys\n5 Set UID\n6 Unbrick UID\n7 Firmware check\n0[0|1] debug mode"));
+    Serial.println(F("0 Decrypt Toy\n1 Dump EML\n2 Serial dump\n3 Reset Toy\n4 Reset keys\n5 Set UID\n6 Unbrick UID\n7 Firmware check\nd[0|1] debug mode"));
 }
 
 /*
@@ -321,11 +330,10 @@ void loop() {
 /*      
  * Options 0 - 7 are useful on a serial monitor
  */
-      case '0':                           // 01 turns on debug mode, 00 turns off debug mode
-        debug = Serial.read() == '1';
-        break;
+      case '0':                           // read card decrypted
+        read_card(true);    break;
       case '1':                           // read the card and dump it in eml format
-        read_card();        break;
+        read_card(false);   break;
       case '2':                           // internal dump card (only works on factory cards)
         dump_serial();      break;
       case '3':                           // reset skylander figure
@@ -338,6 +346,9 @@ void loop() {
         unbrick_uid();      break;
       case '7':                           // RC522 reader firmware self-check
         firmware_check();   break;
+      case 'd':                           // d1 turns on debug mode, d0 turns off debug mode
+        debug = Serial.read() == '1';
+        break;
 /*
  * The remaining options are useful for a connected app, they require extra data to be sent.
  * read_card() must be run first before these work properly and the card must not change
@@ -345,19 +356,19 @@ void loop() {
  */
       case 'R':                           // read the given block (offset by ascii '0')
         choice = Serial.read();           // block ascii range 0x30 "0" - 0x6F "o"
-        Serial.print(read_block(choice-'0') ? "O" : "X");       break;
+        Serial.print(read_block(choice-'0', true) ? _PASS : _FAIL);       break;
       case 'w':                           // TEST write the given block (offset by ascii '0')
-        Serial.print(write_block(Serial.read()-'0', false) ? "O" : "X");      break;
+        Serial.print(write_block(Serial.read()-'0', false) ? _PASS : _FAIL);      break;
       case 'W':                           // write the given block (offset by ascii '0')
-        Serial.print(write_block(Serial.read()-'0', true) ? "O" : "X");      break;    
-      case 'd':                           // TEST write a data stream to the card (authenticates but does not write)
+        Serial.print(write_block(Serial.read()-'0', true) ? _PASS : _FAIL);      break;    
+      case 's':                           // TEST write a data stream to the card (authenticates but does not write)
         debug = false;                    // debug needs to be off to stream blocks
-        Serial.print(write_dump(false) ? "O" : "X");
+        Serial.print(write_stream(false) ? _PASS : _FAIL);
         debug = saved;
         break;
-      case 'D':                           // write a data stream to the card
+      case 'S':                           // write a data stream to the card
         debug = false;                    // debug needs to be off to stream blocks
-        Serial.print(write_dump(true) ? "O" : "X");
+        Serial.print(write_stream(true) ? _PASS : _FAIL);
         debug = saved;
         break;
 /*        
@@ -415,7 +426,7 @@ void set_uid() {
     byte newUid[] = {0x31, 0x32, 0x33, 0x34};         // set known uid here
     if ( mfrc522.MIFARE_SetUid(newUid, (byte)4, true) ) {
       Serial.print(F("Wrote UID "));
-      dump_byte_array(newUid, sizeof(newUid), NULL);
+      dump_byte_array(newUid, sizeof(newUid));
       Serial.println(F(" to card."));
     }
   }
@@ -444,7 +455,7 @@ bool wait_for_card() {
     return true;
 }
 
-void read_card() {
+void read_card(bool decrypt) {
     if (!wait_for_card()) return;
     
     // Show some details of the PICC (that is: the tag/card)
@@ -452,23 +463,43 @@ void read_card() {
     atqa_size = 2;
     mfrc522.PICC_RequestA(atqa, &atqa_size);
     Serial.print(F("ATQA: "));
-    dump_byte_array(atqa, atqa_size);
-    
-    Serial.println(F("--EML DUMP BEGIN"));
+    dump_byte_array(atqa, atqa_size, 1);
+
+    if (!decrypt) Serial.println(F("--EML DUMP BEGIN"));
     bool result = false;
+    byte seq1, seq2;
+    bool blank = true;
     
     // For each block, try the known keys (might not be the same key for every sector)
     for (byte block = 0; block < NUM_BLOCKS; block++) {
-        result = read_block(block);
+        result = read_block(block, (decrypt) ? !shouldEncryptBlock(block) : true);
         if (!result) {
             Serial.print(F("Failed to read block "));
             Serial.println(block);
             break;
         }
+        if (decrypt && block == 8) {
+            for (byte i=0; i < BLOCK_SIZE; i++) {
+                if (daBlock[2][i] != 0) {
+                    blank = false;
+                    break;
+                }
+            }
+        }
+        if (decrypt && !blank && decryptBlock(daBlock[2], block)) {
+            dump_byte_array_int(daBlock[2], BLOCK_SIZE);
+            Serial.print(F(" ["));
+            dump_byte_array1(daBlock[2], BLOCK_SIZE);
+            Serial.println(F("]"));
+            if (block == 8)  seq1 = daBlock[2][9];
+            if (block == 36) seq2 = daBlock[2][9];
+        }
     }
-    if (result) {
-        Serial.println(F("--EML DUMP END"));
+    if (decrypt) {
+      dumpFigureInfo();
+      dumpFigureData((blank) ? 0 : (seq2 > seq1) ? 36 : 8);
     }
+    else Serial.println(F("--EML DUMP END"));
 }
 
 /*
@@ -496,7 +527,7 @@ bool write_block(byte block, byte* data, bool doWrite) {
         Serial.print(block);
         Serial.println();
     }
-    dump_byte_array(data, BLOCK_SIZE, NULL);
+    dump_byte_array(data, BLOCK_SIZE, 0);
 #if 0
     // skip 0 and trailers
     if (isSectorTrailer(block) || block == 0)
@@ -521,7 +552,7 @@ bool write_block(byte block, byte* data, bool doWrite) {
 
          if (debug) {
              Serial.print(F("Authenticating using key "));
-             dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE);
+             dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE, 1);
          }
          if (!auth_key(MFRC522::PICC_CMD_MF_AUTH_KEY_A, block, &key)) {
              if (debug) {
@@ -556,11 +587,11 @@ bool write_block(byte block, byte* data, bool doWrite) {
 
 void stream_block(byte block, byte line) {
     while (Serial.available()) Serial.read();
-    dump_byte_array_int(&block, 1, NULL);
+    dump_byte_array_int(&block, 1, 0);
     Serial.print(F(":"));
     while (Serial.available() < BLOCK_SIZE);
     for (byte k = 0; k < BLOCK_SIZE; k++) {
-        secData[line][k] = Serial.read();
+        daBlock[line][k] = Serial.read();
     }
 }
 
@@ -568,30 +599,32 @@ bool write_block(byte block, bool doWrite) {
     if (block > 63) {
       if (debug) {
         Serial.print(F("block "));
-        dump_byte_array_int(&block, 1, NULL);
+        dump_byte_array_int(&block, 1);
         Serial.println(F(" out of range"));        
       }
       return false;
     }
-    stream_block(block, 0);
-    return write_block(block, secData[0], doWrite);
+    byte line = (block < 2) ? block : 2;
+    stream_block(block, line);
+    return write_block(block, daBlock[line], doWrite);
 }
 
 /*
  * Stream blocks to write over the serial port, but block 0 is last.
  */
-bool write_dump(bool doWrite) {
+bool write_stream(bool doWrite) {
     if (wake_card()) {
       // block 0 write will change the card uid and cause a new card to be found,
       // so we will delay block 0 writing until the end
-      stream_block(0, 3);
-      for (byte block = 1; block < NUM_BLOCKS; block++) {
-        if (!write_block(block, doWrite))
+      for (byte block = 0; block < NUM_BLOCKS; block++) {
+        if (block == 0) {
+          stream_block(0, 0);          
+        } else if (!write_block(block, doWrite)) {
           return false;
+        }
       }
-      if (!write_block(0, secData[3], doWrite))
-          return false;
-      return true;
+      // write block 0 last
+      return write_block(0, daBlock[0], doWrite);
     }
     return false;
 }
@@ -600,13 +633,13 @@ void reset_figure() {
     if (!wait_for_card()) return;
 
     for (byte i = 0; i < 0x10; ++i) {
-        secData[0][i] = 0;
+        daBlock[2][i] = 0;
     }
-    for (byte block = 5; block < 0x40; ++block) {
-        byte offset = block * 0x10;
+    for (byte block = 5; block < NUM_BLOCKS; block++) {
         if (!isSectorTrailer(block) && block != 0x22 && block != 0x3e) {
-            if (!write_block(block, secData[0], true))
+            if (!write_block(block, daBlock[2], true)) {
                 break;
+            }
         }
     } 
 }
@@ -660,7 +693,7 @@ bool reset_keys() {
        return false;
 #else
     Serial.print(F("Authenticating using key "));
-    dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE);
+    dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE, 1);
     if (!auth_key(MFRC522::PICC_CMD_MF_AUTH_KEY_A, block, &key)) {
        Serial.println(F("Auth failed"));
        return false;
@@ -678,4 +711,166 @@ bool reset_keys() {
     }
   }
   return true;
+}
+
+
+/*
+ * Skylander Figure
+ */
+uint16_t get16(byte *data) {
+  return data[0] | ((uint16_t)data[1]) << 8;
+}
+uint32_t get24(byte*data) {
+  return get16(data) | ((uint32_t)data[2]) << 16;
+}
+uint32_t get32(byte *data) {
+  return get24(data) | ((uint32_t)data[3]) << 24;
+}
+
+const __FlashStringHelper *toyName(uint16_t toyId) {
+  switch (toyId) {
+    case 0 : return F("Whirlwind");                      //0000|0030|regular|air
+    case 1 : return F("Sonic Boom");                     //0100|0030|regular|air
+    case 2 : return F("Warnado");                        //0200|0030|regular|air
+    case 3 : return F("Lightning Rod");                  //0300|0030|regular|air
+    case 4 : return F("Bash");                           //0400|0030|regular|earth
+    case 5 : return F("Terrafin");                       //0500|0030|regular|earth
+    case 6 : return F("Dino-Rang");                      //0600|0030|regular|earth
+    case 7 : return F("Prism Break");                    //0700|0030|regular|earth
+    case 8 : return F("Sunburn");                        //0800|0030|regular|fire
+    case 9 : return F("Eruptor");                        //0900|0030|regular|fire
+    case 10 : return F("Ignitor");                       //0a00|0030|regular|fire
+    case 11 : return F("Flameslinger");                  //0b00|0030|regular|fire
+    case 12 : return F("Zap");                           //0c00|0030|regular|water
+    case 13 : return F("Wham-Shell");                    //0d00|0030|regular|water
+    case 14 : return F("Gill Grunt");                    //0e00|0030|regular|water
+    case 15 : return F("Slam Bam");                      //0f00|0030|regular|water
+    case 16 : return F("Spyro");                         //1000|0030|regular|magic
+    case 17 : return F("Voodood");                       //1100|0030|regular|magic
+    case 18 : return F("Double Trouble");                //1200|0030|regular|magic
+    case 19 : return F("Trigger Happy");                 //1300|0030|regular|tech
+    case 20 : return F("Drobot");                        //1400|0030|regular|tech
+    case 21 : return F("Drill Sergeant");                //1500|0030|regular|tech
+    case 22 : return F("Boomer");                        //1600|0030|regular|tech
+    case 23 : return F("Wrecking Ball");                 //1700|0030|regular|magic
+    case 24 : return F("Camo");                          //1800|0030|regular|life
+    case 25 : return F("Zook");                          //1900|0030|regular|life
+    case 26 : return F("Stealth Elf");                   //1a00|0030|regular|life
+    case 27 : return F("Stump Smash");                   //1b00|0030|regular|life
+    case 28 : return F("Dark Spyro");                    //1c00|0030|regular|magic
+    case 29 : return F("Hex");                           //1d00|0030|regular|undead
+    case 30 : return F("Chop Chop");                     //1e00|0030|regular|undead
+    case 31 : return F("Ghost Roaster");                 //1f00|0030|regular|undead
+    case 32 : return F("Cynder");                        //2000|0030|regular|undead
+    //Default fallback option with toyID
+    default : return F("UNKNOWN");
+  }
+}
+
+
+/*
+ * Dumps unencypted info from Sector 0
+ */
+void dumpFigureInfo() {
+    uint32_t   serial = get32(&daBlock[0][0]);
+    uint16_t  toytype = get16(&daBlock[1][0]);
+    byte   *tradingId = &daBlock[1][4];
+    uint16_t  variant = get16(&daBlock[1][12]);
+    uint16_t checksum = get16(&daBlock[1][14]);
+    Serial.print(F("Serial: "));
+    dump_byte_array_int((byte*)&serial, 4);
+    Serial.print(F(" | Type: "));
+    Serial.print(toytype);
+    Serial.print(F(" ("));
+    Serial.print(toyName(toytype));
+    Serial.print(F(") | Variant: "));
+    Serial.print(variant);
+    Serial.print(F(" | TradingID: "));
+    dump_byte_array_int(tradingId, 8);
+    Serial.print(F(" | Checksum: "));
+    dump_byte_array_int((byte*)&checksum, 2);
+    byte cs[2] = { 0xFF, 0xFF };
+    pseudo_crc16(cs, daBlock[0], 30);
+    Serial.println(checksum == get16((byte*)&cs) ? " O" : " X");
+}
+
+uint32_t getXP(byte *data) {
+  return get24(data);
+}
+uint16_t getGold(byte *data) {
+  return get16(data);
+}
+
+/*
+ * Dumps encrypted info from active slot
+ */
+void dumpFigureData(byte slot) {
+    Serial.print(F("Slot: "));
+    Serial.print(slot);
+    if (slot && read_block(slot, false)) {
+      byte *data = daBlock[2];
+      decryptBlock(data, slot);
+      Serial.print(F(" | XP: "));
+      Serial.print(getXP(data));
+      Serial.print(F(" | Gold: "));
+      Serial.println(getGold(data));
+    } else {
+      Serial.println(F(" | No Data"));    
+    }
+ }
+
+
+/*
+ * Crypto
+ */
+
+bool shouldEncryptBlock(byte block) {
+  return (block >= 8 && !isSectorTrailer(block));
+}
+
+ void getEncryptionKey(byte keyOut[kMD5OutputBytes], byte block) {
+  byte data[] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    block,
+    ' ','C','o','p','y','r','i','g','h','t',' ','(','C',')',' ','2',
+    '0','1','0',' ','A','c','t','i','v','i','s','i','o','n','.',' ',
+    'A','l','l',' ','R','i','g','h','t','s',' ','R','e','s','e','r',
+    'v','e','d','.',' '};
+    
+  memcpy(data, daBlock[0], 32);         // blocks 0 and 1 data
+//  dump_byte_array(data, sizeof(data));
+  md5(data, sizeof(data), keyOut);
+}
+
+void encryptAES128ECB(byte *key, byte const *plain, byte *cipher) {
+  aes.set_key(key, 128);
+  aes.encrypt((byte*)plain, cipher);
+}
+
+void decryptAES128ECB(byte *key, byte const *cipher, byte *plain) {
+  aes.set_key(key, 128);
+  aes.decrypt ((byte*)cipher, plain);
+}
+
+bool encryptBlock(byte *data, byte block) {
+  if (shouldEncryptBlock(block)) {
+    byte key[16], cipher[16];
+    getEncryptionKey(key, block);
+    encryptAES128ECB(key, data, cipher);
+    memcpy(data, cipher, sizeof(cipher));
+    return true;
+  }
+  return false;
+}
+
+bool decryptBlock(byte *data, byte block) {
+  if (shouldEncryptBlock(block)) {
+    byte key[16], plain[16];
+    getEncryptionKey(key, block);
+    decryptAES128ECB(key, data, plain);
+    memcpy(data, plain, sizeof(plain));
+    return true;
+  }
+  return false;
 }

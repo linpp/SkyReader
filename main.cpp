@@ -50,7 +50,15 @@ void usage()
 		   "Upgrade skylander, leave skills as is, and write to the portal.\n"
 		   "\n"
 		   "editor -i spyro.bin -P\n"
-		   "Read file from spyro.bin and write it to the portal.\n");
+		   "Read file from spyro.bin and write it to the portal.\n"
+		   "\n"
+		   "editor -r /dev/cu.usbserial-14430 -p -D\n"
+		   "Redirect portal (-p) to an mfrc522 arduino on /dev/cu.usbserial-14430 and\n"
+		   "dump the card on the device.\n"
+		   "\n"
+		   "editor -r /dev/cu.usbserial-14430 -i spyro.bin -P\n"
+		   "Redirect portal (-P) to an mfrc522 arduino on /dev/cu.usbserial-14430 and\n"
+		   "write spyro.bin to the card on the device.\n");
 }
 
 void printquad (unsigned int i)
