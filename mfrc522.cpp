@@ -120,6 +120,7 @@ bool MFRC522::WriteBlock(unsigned char block, unsigned char data[0x10], int skyl
 								for (int i=0; i<34; i++) {
 									printf("%c", buffer[i]);
 								}
+								printf("\n");
 							}
 							//printf("result: %c\n", buffer[34]);
 							return (buffer[34] == 'O');
