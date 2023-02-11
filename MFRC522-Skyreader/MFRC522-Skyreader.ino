@@ -56,6 +56,8 @@ MFRC522::StatusCode status;
 bool debug = false;
 uint16_t toyType = 0xFFFF;
 uint32_t newUid = 0;
+uint32_t tradingIdH = 0;
+uint32_t tradingIdL = 0;
 
 AES aes;
 
@@ -357,6 +359,9 @@ void setup() {
   SPI.begin();                // Init SPI bus
   mfrc522.PCD_Init();         // Init MFRC522 card
   randomSeed(analogRead(0));
+#ifdef MD5_TEST
+  MD5Test();
+#endif
   menu();
   Serial.print(F("$"));
 }
@@ -516,7 +521,11 @@ bool update_card() {
           dump_byte_array(buf[0], 32, 0);
         }
         if (toyType != 0xFFFF) {                             // if we have a new toy type, change it
-          memcpy(&buf[1], (byte*)&toyType, 2);
+          memcpy(&buf[1][0], (byte*)&toyType, 2);
+        }
+        if (tradingIdH) {
+          memcpy(&buf[1][4], (byte*)&tradingIdH, 4);
+          memcpy(&buf[1][8], (byte*)&tradingIdL, 4);
         }
         update_checksum(buf);
         if (!write_block(1, buf[1], wm_normal)) {            // write block 1 first
@@ -739,6 +748,11 @@ bool set_toy(byte *data, byte l) {
     Serial.print("ToyType: ");
     Serial.println(toy);
     toyType = toy;
+    read_block(0, false);
+    if (memcmp(secKeys[0], knownKeys[0], MFRC522::MF_KEY_SIZE) != 0) {   // card is factory formatted
+      tradingIdH = random(0x80000000) * random(0x8000);                  // generate random trading Id
+      tradingIdL = random(0x80000000) * random(0x8000);
+    }
     return true;
   }
   return false;

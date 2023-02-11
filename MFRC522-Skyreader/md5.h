@@ -1,6 +1,6 @@
 /*
    Simple md5 for memory constrained devices.  The goal is not fastest speed, but smaller footprint.
-   Most md5 libraries take over 6k of available memory, this implementation takes less than 2k.
+   Most md5 libraries take over 6k of available memory, this implementation takes less than 1.9k.
 
    1/25/2023 Peter Lin
 */
@@ -9,6 +9,7 @@
 
 #include <arduino.h>
 
+//#define MD5_TEST
 #define MD5_BLOCK_BITS 512
 #define MD5_BLOCK_SIZE (512/8)
 
@@ -23,4 +24,7 @@ void MD5Update(MD5CONTEXT *context, const uint8_t *data, uint32_t len);
 void MD5Finalize(MD5CONTEXT *context, uint8_t hash[16]);
 void MD5(const uint8_t *data, uint32_t len, uint8_t hash[16]);
 
+#ifdef MD5_TEST
+void MD5Test();
+#endif
 #endif

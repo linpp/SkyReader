@@ -1,6 +1,6 @@
 /*
    Simple md5 for memory constrained devices.  The goal is not fastest speed, but smaller footprint.
-   Most md5 take over 6k of available memory, this implementation takes less than 2k.
+   Most md5 libraries take over 6k of available memory, this implementation takes less than 1.9k.
 
    1/25/2023 Peter Lin
 */
@@ -9,6 +9,35 @@
 #include <string.h>
 #include "md5.h"
 #include <avr/pgmspace.h>
+
+# ifdef MD5_TEST
+struct _md5_test {
+  const char *data;
+  uint32_t hash[4];
+} md5_tests[] = {      // RFC1321
+  {"",
+  {0xd98c1dd4, 0x04b2008f, 0x980980e9, 0x7e42f8ec}},
+  {"a",
+  {0xb975c10c, 0xa8b6f1c0, 0xe299c331, 0x61267769}},
+  {"abc",
+  {0x98500190, 0xb04fd23c, 0x7d3f96d6, 0x727fe128}},
+  {"message digest",
+  {0x7d696bf9, 0x8d93b77c, 0x312f5a52, 0xd061f1aa}},
+  {"abcdefghijklmnopqrstuvwxyz",
+  {0xd7d3fcc3, 0x00e49261, 0x6c49fb7d, 0x3be167ca}},
+  {"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+  {0x98ab74d1, 0xf5d977d2, 0x2c1c61a5, 0x9f9d419f}},
+  {"12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+  {0xa2f4ed57, 0x55c9e32b, 0x2eda49ac, 0x7ab60721}}
+};
+void MD5Test() {
+  byte hash[16];
+  for (byte i = 0; i < (sizeof(md5_tests)/sizeof(_md5_test)); i++) {
+    MD5((uint8_t *)md5_tests[i].data, strlen(md5_tests[i].data), hash);
+    Serial.println(memcmp(hash, md5_tests[i].hash, 16) == 0 ? F("O") : F("X"));
+  }
+}
+#endif
 
 #define F1(x, y, z) (x & y | ~x & z)
 #define F2(x, y, z) F1(z, x, y)
@@ -42,20 +71,34 @@ static void MD5Transform(uint32_t var[4], uint32_t const in[16])
   b = *var++;
   c = *var++;
   d = *var;
-  for (uint8_t i = 0; i < 4; i++) {                       // do 4 rounds
-    uint32_t m = pgm_read_dword(&rounds[i][0]);
-    uint8_t o  = (m >> 20) & 0xf;                         // initial offset
-    uint8_t od = (m >> 16) & 0xf;                         // offset displacement
-    uint8_t r0 = m & 0xf;                                 // generate rotations for this round
-    uint8_t r1 = r0 + ((m >> 4) & 0xf);
-    uint8_t r2 = r1 + ((m >> 8) & 0xf);
-    uint8_t r3 = r2 + ((m >> 12) & 0xf);
-    const uint32_t *pd = &rounds[i][1];                   // precalculated sines in progmem
-    for (uint8_t j = 0; j < 4; j++) {
-      a = MD5STEP(i + 1, a, b, c, d, in[o] + pgm_read_dword(pd++), r0); o = (o + od) & 0xf;
-      d = MD5STEP(i + 1, d, a, b, c, in[o] + pgm_read_dword(pd++), r1); o = (o + od) & 0xf;
-      c = MD5STEP(i + 1, c, d, a, b, in[o] + pgm_read_dword(pd++), r2); o = (o + od) & 0xf;
-      b = MD5STEP(i + 1, b, c, d, a, in[o] + pgm_read_dword(pd++), r3); o = (o + od) & 0xf;
+  const uint32_t *pd = rounds[0];                         // round displacements and precalculated sines
+  for (uint8_t i = 0; i < 4; ++i,++pd) {                  // do 4 rounds
+    const uint16_t *pw = (const uint16_t *)pd;            // get displacements
+    uint16_t m = pgm_read_word(pw++);                     // stored in LE, read in reverse
+    uint16_t n = pgm_read_word(pw);
+    uint8_t o  = (n>>4) & 0xf;                            // initial offset
+    uint8_t od = n & 0xf;                                 // offset displacement
+    for (uint8_t r, j = 0; j < 16; j++) {
+      uint32_t t = in[o] + pgm_read_dword(++pd);
+      switch (j&3) {
+        case 0:
+          n = m;
+          r = n & 0xf;                                    // initial rotation
+          a = MD5STEP(i + 1, a, b, c, d, t, r);
+          break;
+        case 1:
+          d = MD5STEP(i + 1, d, a, b, c, t, r);
+          break;
+        case 2:
+          c = MD5STEP(i + 1, c, d, a, b, t, r);
+          break;
+        case 3:
+          b = MD5STEP(i + 1, b, c, d, a, t, r);
+          break;
+      }
+      n >>= 4;
+      r += n & 0xf;                                        // next rotation
+      o = (o + od) & 0xf;                                  // next offset
     }
   }
   *var-- += d;
