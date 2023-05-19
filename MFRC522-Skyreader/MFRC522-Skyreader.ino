@@ -399,8 +399,13 @@ void loop() {
       case '4':                             // RC522 reader firmware self-check
         firmware_check();
         break;
+      case '5':
+        fix_bricked();
+        break;      
       case 'd':                             // d1 turns on debug mode, d0 turns off debug mode
         debug = Serial.read() == '1';
+        Serial.print(F("debug "));
+        Serial.println(debug);
         break;
       case 'F':                             // reset skylander figure
         reset_figure();
@@ -477,11 +482,19 @@ void firmware_check() {
 }
 
 void fix_bricked() {
-  // despite the name, UnbrickUidSector only writes to block 0, not the entire sector
-  if ( mfrc522.MIFARE_UnbrickUidSector(true) ) {
-    Serial.println(F("Cleared block 0, set UID to 1234. Card should be responsive again now."));
+  mfrc522.MIFARE_OpenUidBackdoor(true);
+  byte block0_buffer[] = {0x23, 0x77, 0xBB, 0x1F, 0xF0, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};  
+  byte key_buffer[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0x80, 0x69, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  // Write modified block 0 back to card
+  MFRC522::StatusCode status = mfrc522.MIFARE_Write((byte)0, block0_buffer, (byte)16);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print(F("MIFARE_Write() failed: "));
+    Serial.println(MFRC522::GetStatusCodeName(status));
+    return false;
   }
+  return true;
 }
+
 
 /*
    Set a new UID from hexstring. if none, use default 0x31323334
